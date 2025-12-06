@@ -182,6 +182,75 @@ async def analyze_emotion(request: EmotionRequest):
             "all_emotions": {}
         }
 
+@app.post("/api/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    """
+    Transcribe speech to text using Whisper
+    """
+    try:
+        import whisper
+        import tempfile
+        import os
+        from pydub import AudioSegment
+        
+        print("=" * 50)
+        print("💬 TRANSCRIPTION REQUEST RECEIVED")
+        print(f"   Audio filename: {audio.filename}")
+        print(f"   Content type: {audio.content_type}")
+        
+        # Read uploaded audio bytes
+        audio_bytes = await audio.read()
+        print(f"   Audio size: {len(audio_bytes)} bytes")
+        
+        # Create temp files for conversion
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_webm:
+            temp_webm.write(audio_bytes)
+            temp_webm_path = temp_webm.name
+        
+        # Convert webm to wav using pydub
+        temp_wav_path = temp_webm_path.replace('.webm', '.wav')
+        try:
+            audio_segment = AudioSegment.from_file(temp_webm_path, format="webm")
+            audio_segment.export(temp_wav_path, format="wav")
+            temp_audio_path = temp_wav_path
+            print(f"   ✅ Conversion successful! Duration: {len(audio_segment)}ms")
+        except Exception as convert_error:
+            print(f"   ⚠️ Conversion error: {convert_error}")
+            temp_audio_path = temp_webm_path
+        
+        try:
+            # Load Whisper model (using 'tiny' for speed)
+            print("   Loading Whisper model...")
+            model = whisper.load_model("tiny")
+            
+            # Transcribe
+            print("   Transcribing audio...")
+            result = model.transcribe(temp_audio_path, language="en")
+            text = result["text"].strip()
+            
+            print(f"   📝 Transcription: '{text}'")
+            print("=" * 50)
+            
+            return {
+                "text": text,
+                "language": result.get("language", "en")
+            }
+            
+        finally:
+            # Clean up temporary files
+            if os.path.exists(temp_webm_path):
+                os.unlink(temp_webm_path)
+            if os.path.exists(temp_wav_path):
+                os.unlink(temp_wav_path)
+        
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"Error transcribing audio: {str(e)}")
+        print(f"Full traceback:\n{error_detail}")
+        raise HTTPException(status_code=500, detail=f"Error transcribing: {str(e)}")
+
+
 @app.post("/api/tone")
 async def analyze_tone(audio: UploadFile = File(...)):
     """

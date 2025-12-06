@@ -38,6 +38,14 @@ function Home({ onOpenSettings }) {
   const streamRef = useRef(null);
   const voiceIntervalRef = useRef(null);
 
+  // Transcription State
+  const [transcriptPaused, setTranscriptPaused] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState([]);
+  const [currentTranscript, setCurrentTranscript] = useState("");
+  const transcriptStreamRef = useRef(null);
+  const transcriptIntervalRef = useRef(null);
+
   // Emotion Analysis
   const analyzeEmotion = useCallback(async () => {
     if (emotionPaused || isAnalyzing) return;
@@ -107,12 +115,12 @@ function Home({ onOpenSettings }) {
 
       recorder.start();
 
-      // Record for 2 seconds
+      // Record for 0.5 seconds
       setTimeout(() => {
         if (recorder.state === "recording") {
           recorder.stop();
         }
-      }, 2000);
+      }, 500);
     });
   }, [voicePaused]);
 
@@ -131,10 +139,10 @@ function Home({ onOpenSettings }) {
     // Start immediately
     recordAndAnalyze();
 
-    // Then repeat every 2.5 seconds (2s record + 0.5s gap)
+    // Then repeat every 0.6 seconds (0.5s record + 0.1s gap)
     voiceIntervalRef.current = setInterval(() => {
       recordAndAnalyze();
-    }, 2500);
+    }, 600);
 
     return () => {
       if (voiceIntervalRef.current) {
@@ -239,13 +247,152 @@ function Home({ onOpenSettings }) {
     console.log("✅ Voice analysis stopped");
   };
 
-  // Auto-analyze emotion every 1.5 seconds when not paused
+  // Transcription - Record and transcribe in chunks
+  const recordAndTranscribe = useCallback(async () => {
+    if (!transcriptStreamRef.current || transcriptPaused) return;
+
+    console.log("💬 Starting transcription recording chunk...");
+
+    return new Promise((resolve) => {
+      const chunks = [];
+      const recorder = new MediaRecorder(transcriptStreamRef.current);
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        if (chunks.length > 0) {
+          const audioBlob = new Blob(chunks, { type: "audio/webm" });
+          console.log(`💬 Recording complete: ${audioBlob.size} bytes`);
+          await transcribeAudio(audioBlob);
+        }
+        resolve();
+      };
+
+      recorder.start();
+
+      // Record for 1.5 seconds for real-time transcription
+      setTimeout(() => {
+        if (recorder.state === "recording") {
+          recorder.stop();
+        }
+      }, 1500);
+    });
+  }, [transcriptPaused]);
+
+  // Continuous transcription effect
+  useEffect(() => {
+    if (!isTranscribing || transcriptPaused) {
+      if (transcriptIntervalRef.current) {
+        clearInterval(transcriptIntervalRef.current);
+        transcriptIntervalRef.current = null;
+      }
+      return;
+    }
+
+    console.log("💬 Starting continuous transcription...");
+
+    // Start immediately
+    recordAndTranscribe();
+
+    // Then repeat every 1.7 seconds (1.5s record + 0.2s gap)
+    transcriptIntervalRef.current = setInterval(() => {
+      recordAndTranscribe();
+    }, 1700);
+
+    return () => {
+      if (transcriptIntervalRef.current) {
+        clearInterval(transcriptIntervalRef.current);
+        transcriptIntervalRef.current = null;
+      }
+    };
+  }, [isTranscribing, transcriptPaused, recordAndTranscribe]);
+
+  const startTranscribing = async () => {
+    try {
+      console.log("💬 Requesting microphone access for transcription...");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      transcriptStreamRef.current = stream;
+      console.log("✅ Microphone access granted for transcription!");
+
+      setIsTranscribing(true);
+      console.log("💬 Transcription started!");
+    } catch (error) {
+      console.error("Error accessing microphone:", error);
+    }
+  };
+
+  const transcribeAudio = async (audioBlob) => {
+    try {
+      console.log(
+        `📤 Sending audio for transcription: ${audioBlob.size} bytes`
+      );
+      const formData = new FormData();
+      formData.append("audio", audioBlob, "recording.webm");
+
+      const response = await fetch("http://localhost:8000/api/transcribe", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        console.error("❌ Backend error:", response.status);
+        return;
+      }
+
+      const data = await response.json();
+      const text = data.text?.trim();
+
+      // Update current transcript (shows what's being said right now)
+      setCurrentTranscript(text || "");
+
+      if (text && text.length > 0) {
+        console.log(`✅ Transcription: "${text}"`);
+        setConversationHistory((prev) => {
+          const newEntry = {
+            id: Date.now(),
+            text: text,
+            timestamp: new Date().toLocaleTimeString(),
+          };
+          // Keep last 20 entries
+          const updated = [...prev, newEntry].slice(-20);
+          return updated;
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error transcribing:", error);
+    }
+  };
+
+  const stopTranscribing = () => {
+    console.log("🛑 Stopping transcription...");
+
+    // Clear the interval
+    if (transcriptIntervalRef.current) {
+      clearInterval(transcriptIntervalRef.current);
+      transcriptIntervalRef.current = null;
+    }
+
+    // Stop the stream
+    if (transcriptStreamRef.current) {
+      transcriptStreamRef.current.getTracks().forEach((track) => track.stop());
+      transcriptStreamRef.current = null;
+    }
+
+    setIsTranscribing(false);
+    console.log("✅ Transcription stopped");
+  };
+
+  // Auto-analyze emotion every 0.5 seconds when not paused
   useEffect(() => {
     if (emotionPaused) return;
 
     const interval = setInterval(() => {
       analyzeEmotion();
-    }, 1500);
+    }, 500);
 
     // Initial analysis
     analyzeEmotion();
@@ -256,160 +403,180 @@ function Home({ onOpenSettings }) {
   useEffect(() => {
     return () => {
       stopListening();
+      stopTranscribing();
     };
   }, []);
 
   return (
     <div className="home">
-      <Header title="Emotion Helper" />
+      <Header title="Clari-Cue" />
 
       <div className="home-content">
-        {/* Emotion Recognition Section */}
-        <div className="analysis-section">
-          <h2 className="section-title">Emotion Recognition</h2>
-          <div className="emotion-content">
-            <div className="camera-section">
-              <div className="camera-feed">
-                <Webcam
-                  audio={false}
-                  ref={webcamRef}
-                  screenshotFormat="image/jpeg"
-                  videoConstraints={{
-                    width: 640,
-                    height: 480,
-                    facingMode: "user",
-                  }}
-                />
-                {isAnalyzing && (
-                  <div className="analyzing-indicator">
-                    <span className="pulse-dot"></span> Analyzing...
-                  </div>
-                )}
+        {/* Left Side - Camera */}
+        <div className="camera-panel">
+          <div className="camera-feed">
+            <Webcam
+              audio={false}
+              ref={webcamRef}
+              screenshotFormat="image/jpeg"
+              videoConstraints={{
+                width: 640,
+                height: 480,
+                facingMode: "user",
+              }}
+            />
+            {isAnalyzing && (
+              <div className="analyzing-indicator">
+                <span className="pulse-dot"></span> Analyzing...
               </div>
-            </div>
-
-            <div className="interpretation-section">
-              <div className={`emotion-label ${isAnalyzing ? "updating" : ""}`}>
-                <h3>Detected: {emotionData.emotion}</h3>
-              </div>
-
-              <div className="emotion-explanation">
-                <p>{emotionData.explanation}</p>
-              </div>
-
-              {emotionData.confidence > 0 && (
-                <div className="confidence-section">
-                  <p>
-                    <strong>Confidence:</strong>{" "}
-                    {emotionData.confidence.toFixed(1)}%
-                  </p>
-                </div>
-              )}
-
-              <div className="emotion-details">
-                <p>
-                  <strong>Eyes:</strong> {emotionData.details.eyes}
-                </p>
-                <p>
-                  <strong>Mouth:</strong> {emotionData.details.mouth}
-                </p>
-                <p>
-                  <strong>Posture:</strong> {emotionData.details.posture}
-                </p>
-              </div>
-
-              <div className="controls">
-                <LargeButton
-                  onClick={() => setEmotionPaused(!emotionPaused)}
-                  variant="primary"
-                >
-                  {emotionPaused ? "Resume" : "Pause"}
-                </LargeButton>
-                <LargeButton onClick={analyzeEmotion} variant="secondary">
-                  Analyze Now
-                </LargeButton>
-              </div>
-            </div>
+            )}
+          </div>
+          <div className="camera-controls">
+            <LargeButton onClick={onOpenSettings} variant="settings">
+              Settings
+            </LargeButton>
           </div>
         </div>
 
-        {/* Voice Tone Section */}
-        <div className="analysis-section">
-          <h2 className="section-title">Voice Tone Analysis</h2>
-          <div className="voice-content">
-            <div className="visualizer-section">
-              <div className="volume-bar-container">
-                <div className="volume-label">Voice Level</div>
-                <div className="volume-bar">
-                  <div
-                    className="volume-fill"
-                    style={{ width: `${audioLevel}%` }}
-                  />
-                </div>
+        {/* Right Side - Interpreters */}
+        <div className="interpreters-panel">
+          {/* Face Emotion Interpreter */}
+          <div className="interpreter-card">
+            <div className="interpreter-header">
+              <h3>😊 Facial Expression</h3>
+              <div className="interpreter-controls">
+                <button
+                  className={`control-btn ${emotionPaused ? "paused" : ""}`}
+                  onClick={() => setEmotionPaused(!emotionPaused)}
+                >
+                  {emotionPaused ? "▶" : "⏸"}
+                </button>
               </div>
             </div>
-
-            <div className="tone-interpretation">
-              <div className="tone-label">
-                <h3>Detected: {toneData.emotion}</h3>
+            <div className="interpreter-content">
+              <div className="emotion-result">
+                <span className="emotion-name">{emotionData.emotion}</span>
+                {emotionData.confidence > 0 && (
+                  <span className="emotion-confidence">
+                    {emotionData.confidence.toFixed(0)}%
+                  </span>
+                )}
               </div>
+              <p className="emotion-explanation">{emotionData.explanation}</p>
+            </div>
+          </div>
 
-              <div className="tone-explanation">
-                <p>{toneData.explanation}</p>
-              </div>
-
-              {toneData.confidence > 0 && (
-                <div className="confidence-section">
-                  <p>
-                    <strong>Confidence:</strong>{" "}
-                    {toneData.confidence.toFixed(1)}%
-                  </p>
-                </div>
-              )}
-
-              {Object.keys(toneData.all_emotions).length > 0 && (
-                <div className="emotion-details">
-                  <p>
-                    <strong>All Emotions:</strong>
-                  </p>
-                  {Object.entries(toneData.all_emotions).map(
-                    ([emotion, score]) => (
-                      <p key={emotion}>
-                        {emotion}: {score}%
-                      </p>
-                    )
-                  )}
-                </div>
-              )}
-
-              <div className="controls">
+          {/* Voice Emotion Interpreter */}
+          <div className="interpreter-card">
+            <div className="interpreter-header">
+              <h3>🎤 Voice Tone</h3>
+              <div className="interpreter-controls">
                 {!isListening ? (
-                  <LargeButton onClick={startListening} variant="primary">
-                    Start Listening
-                  </LargeButton>
+                  <button
+                    className="control-btn start"
+                    onClick={startListening}
+                  >
+                    ▶
+                  </button>
                 ) : (
                   <>
-                    <LargeButton
+                    <button
+                      className={`control-btn ${voicePaused ? "paused" : ""}`}
                       onClick={() => setVoicePaused(!voicePaused)}
-                      variant="primary"
                     >
-                      {voicePaused ? "Resume" : "Pause"}
-                    </LargeButton>
-                    <LargeButton onClick={stopListening} variant="secondary">
-                      Stop
-                    </LargeButton>
+                      {voicePaused ? "▶" : "⏸"}
+                    </button>
+                    <button
+                      className="control-btn stop"
+                      onClick={stopListening}
+                    >
+                      ⏹
+                    </button>
                   </>
                 )}
               </div>
             </div>
+            <div className="interpreter-content">
+              <div className="volume-bar">
+                <div
+                  className="volume-fill"
+                  style={{ width: `${audioLevel}%` }}
+                />
+              </div>
+              <div className="emotion-result">
+                <span className="emotion-name">{toneData.emotion}</span>
+                {toneData.confidence > 0 && (
+                  <span className="emotion-confidence">
+                    {toneData.confidence.toFixed(0)}%
+                  </span>
+                )}
+              </div>
+              <p className="emotion-explanation">{toneData.explanation}</p>
+            </div>
           </div>
-        </div>
 
-        {/* Settings Button */}
-        <div className="settings-corner">
-          <LargeButton onClick={onOpenSettings} variant="settings">
-            Settings
-          </LargeButton>
+          {/* Conversation History Interpreter */}
+          <div className="interpreter-card">
+            <div className="interpreter-header">
+              <h3>💬 Conversation History</h3>
+              <div className="interpreter-controls">
+                {!isTranscribing ? (
+                  <button
+                    className="control-btn start"
+                    onClick={startTranscribing}
+                  >
+                    ▶
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className={`control-btn ${
+                        transcriptPaused ? "paused" : ""
+                      }`}
+                      onClick={() => setTranscriptPaused(!transcriptPaused)}
+                    >
+                      {transcriptPaused ? "▶" : "⏸"}
+                    </button>
+                    <button
+                      className="control-btn stop"
+                      onClick={stopTranscribing}
+                    >
+                      ⏹
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="interpreter-content conversation-content">
+              {/* Current live transcript */}
+              {isTranscribing && (
+                <div className="live-transcript">
+                  <span className="live-indicator">●</span>
+                  <span className="live-text">
+                    {currentTranscript || "Listening..."}
+                  </span>
+                </div>
+              )}
+
+              {/* Conversation history */}
+              {!isTranscribing && conversationHistory.length === 0 ? (
+                <p className="placeholder-text">
+                  Press ▶ to start conversation tracking
+                </p>
+              ) : (
+                <div className="conversation-list">
+                  {conversationHistory.map((entry) => (
+                    <div key={entry.id} className="conversation-entry">
+                      <span className="conversation-time">
+                        {entry.timestamp}
+                      </span>
+                      <span className="conversation-text">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
