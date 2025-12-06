@@ -79,3 +79,22 @@
 .close-button:hover {
   opacity: 0.85;
 }
+
+/* Dark theme overrides */
+body.theme-dark .modal-content {
+  background: #374151;
+}
+
+body.theme-dark .modal-content h2 {
+  color: #f9fafb;
+}
+
+body.theme-dark .setting-group label {
+  color: #e5e7eb;
+}
+
+body.theme-dark .setting-group select {
+  background: #1f2937;
+  color: #e5e7eb;
+  border-color: #4b5563;
+}

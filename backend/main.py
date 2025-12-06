@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
 import uvicorn
 import base64
 import random
@@ -9,6 +10,34 @@ import numpy as np
 from PIL import Image
 from deepface import DeepFace
 import cv2
+import os
+from datetime import datetime
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure Gemini AI
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print(f"✅ Gemini AI configured")
+else:
+    print("⚠️ GEMINI_API_KEY not found - AI interpretation will be unavailable")
+
+# Set up ffmpeg path for pydub using imageio-ffmpeg
+FFMPEG_PATH = None
+FFPROBE_PATH = None
+try:
+    import imageio_ffmpeg
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+    FFPROBE_PATH = FFMPEG_PATH.replace('ffmpeg', 'ffprobe')  # imageio-ffmpeg may not have ffprobe
+    ffmpeg_dir = os.path.dirname(FFMPEG_PATH)
+    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    print(f"✅ FFmpeg configured from: {FFMPEG_PATH}")
+except Exception as e:
+    print(f"⚠️ Could not configure FFmpeg: {e}")
 
 app = FastAPI()
 
@@ -191,7 +220,9 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         import whisper
         import tempfile
         import os
-        from pydub import AudioSegment
+        import subprocess
+        import librosa
+        import numpy as np
         
         print("=" * 50)
         print("💬 TRANSCRIPTION REQUEST RECEIVED")
@@ -207,25 +238,47 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             temp_webm.write(audio_bytes)
             temp_webm_path = temp_webm.name
         
-        # Convert webm to wav using pydub
+        # Convert webm to wav using ffmpeg directly
         temp_wav_path = temp_webm_path.replace('.webm', '.wav')
-        try:
-            audio_segment = AudioSegment.from_file(temp_webm_path, format="webm")
-            audio_segment.export(temp_wav_path, format="wav")
-            temp_audio_path = temp_wav_path
-            print(f"   ✅ Conversion successful! Duration: {len(audio_segment)}ms")
-        except Exception as convert_error:
-            print(f"   ⚠️ Conversion error: {convert_error}")
-            temp_audio_path = temp_webm_path
+        temp_audio_path = None
         
         try:
+            if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+                result = subprocess.run([
+                    FFMPEG_PATH, '-y', '-i', temp_webm_path,
+                    '-ar', '16000', '-ac', '1', '-f', 'wav', temp_wav_path
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 and os.path.exists(temp_wav_path):
+                    temp_audio_path = temp_wav_path
+                    print(f"   ✅ FFmpeg conversion successful!")
+                else:
+                    print(f"   ⚠️ FFmpeg error: {result.stderr}")
+                    raise HTTPException(status_code=500, detail="Failed to convert audio")
+            else:
+                print(f"   ❌ FFmpeg not found at: {FFMPEG_PATH}")
+                raise HTTPException(status_code=500, detail="FFmpeg not available")
+        except subprocess.TimeoutExpired:
+            print("   ⚠️ FFmpeg conversion timed out")
+            raise HTTPException(status_code=500, detail="Audio conversion timeout")
+        except Exception as convert_error:
+            print(f"   ⚠️ Conversion error: {convert_error}")
+            raise HTTPException(status_code=500, detail=f"Conversion error: {convert_error}")
+        
+        try:
+            # Load audio using librosa (bypasses Whisper's internal ffmpeg call)
+            print("   Loading audio with librosa...")
+            audio_array, sr = librosa.load(temp_audio_path, sr=16000, mono=True)
+            audio_array = audio_array.astype(np.float32)
+            print(f"   ✅ Audio loaded! Duration: {len(audio_array)/sr:.2f}s")
+            
             # Load Whisper model (using 'tiny' for speed)
             print("   Loading Whisper model...")
             model = whisper.load_model("tiny")
             
-            # Transcribe
+            # Transcribe using the numpy array directly
             print("   Transcribing audio...")
-            result = model.transcribe(temp_audio_path, language="en")
+            result = model.transcribe(audio_array, language="en")
             text = result["text"].strip()
             
             print(f"   📝 Transcription: '{text}'")
@@ -240,9 +293,11 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             # Clean up temporary files
             if os.path.exists(temp_webm_path):
                 os.unlink(temp_webm_path)
-            if os.path.exists(temp_wav_path):
-                os.unlink(temp_wav_path)
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                os.unlink(temp_audio_path)
         
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -261,8 +316,7 @@ async def analyze_tone(audio: UploadFile = File(...)):
         import soundfile as sf
         import tempfile
         import os
-        from pydub import AudioSegment
-        import io
+        import subprocess
         
         print("=" * 50)
         print("🎤 VOICE ANALYSIS REQUEST RECEIVED")
@@ -280,27 +334,38 @@ async def analyze_tone(audio: UploadFile = File(...)):
         
         print(f"   Saved to temp file: {temp_webm_path}")
         
-        # Convert webm to wav using pydub
+        # Convert webm to wav using ffmpeg directly via subprocess
         temp_wav_path = temp_webm_path.replace('.webm', '.wav')
+        temp_audio_path = None
+        
         try:
-            print("   Converting WebM to WAV using pydub...")
-            # Try to load as webm first (most common from browser)
-            audio_segment = AudioSegment.from_file(temp_webm_path, format="webm")
-            audio_segment.export(temp_wav_path, format="wav")
-            temp_audio_path = temp_wav_path
-            print(f"   ✅ Conversion successful! Duration: {len(audio_segment)}ms")
+            print("   Converting WebM to WAV using ffmpeg...")
+            if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+                # Use imageio-ffmpeg
+                result = subprocess.run([
+                    FFMPEG_PATH, '-y', '-i', temp_webm_path,
+                    '-ar', '16000', '-ac', '1', '-f', 'wav', temp_wav_path
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 and os.path.exists(temp_wav_path):
+                    temp_audio_path = temp_wav_path
+                    print(f"   ✅ FFmpeg conversion successful!")
+                else:
+                    print(f"   ⚠️ FFmpeg error: {result.stderr}")
+            else:
+                print(f"   ⚠️ FFmpeg not found at: {FFMPEG_PATH}")
         except Exception as convert_error:
             print(f"   ⚠️ Conversion error: {convert_error}")
+        
+        # Fallback: try to load webm directly with librosa (may work with audioread)
+        if not temp_audio_path:
             print("   Trying direct load as fallback...")
-            # If conversion fails, try saving directly as wav
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_wav:
-                temp_wav.write(audio_bytes)
-                temp_audio_path = temp_wav.name
+            temp_audio_path = temp_webm_path
         
         try:
             # Load audio file
-            print("   Loading audio with librosa...")
-            y, sr = librosa.load(temp_audio_path, sr=None)
+            print(f"   Loading audio from: {temp_audio_path}")
+            y, sr = librosa.load(temp_audio_path, sr=16000)
             print(f"   ✅ Audio loaded! Sample rate: {sr}, Duration: {len(y)/sr:.2f}s")
             
             # Extract audio features
@@ -386,6 +451,594 @@ async def analyze_tone(audio: UploadFile = File(...)):
         print(f"Error analyzing speech emotion: {str(e)}")
         print(f"Full traceback:\n{error_detail}")
         raise HTTPException(status_code=500, detail=f"Error analyzing speech: {str(e)}")
+
+
+# ============================================
+# SOCIAL INTERPRETER - AI-powered guidance
+# ============================================
+
+class ConversationTurn(BaseModel):
+    speaker: str  # "other_person" or "user"
+    text: str
+    emotion_label: Optional[str] = None
+    emotion_intensity: Optional[float] = None
+    timestamp: str
+
+class EmotionSnapshot(BaseModel):
+    emotion: str
+    confidence: float
+    timestamp: int  # milliseconds since epoch
+
+class InterpreterRequest(BaseModel):
+    conversation_history: List[ConversationTurn]
+    emotion_history: Optional[List[EmotionSnapshot]] = []
+    current_facial_emotion: Optional[str] = None
+    current_facial_confidence: Optional[float] = None
+    current_voice_emotion: Optional[str] = None
+    current_voice_confidence: Optional[float] = None
+    combined_emotion: Optional[str] = None
+    combined_confidence: Optional[float] = None
+
+class SuggestedAction(BaseModel):
+    type: str  # verbal_reply, ask_question, check_in, change_topic, pause_conversation
+    text: str
+
+class InterpreterResponse(BaseModel):
+    situation_label: str
+    situation_type: str  # casual_chat, potential_conflict, confusion, boredom, positive_moment, high_distress
+    explanation: str
+    suggestions: List[SuggestedAction]
+    severity: str  # low, medium, high
+    emotion_trend: str  # improving, stable, declining
+
+# Conflict/frustration indicators
+CONFLICT_KEYWORDS = [
+    "whatever", "fine", "forget it", "i don't care", "you never listen",
+    "you always", "you never", "this is stupid", "i'm done", "leave me alone",
+    "stop it", "shut up", "i hate", "annoying", "frustrated", "ugh"
+]
+
+# Confusion indicators
+CONFUSION_KEYWORDS = [
+    "i don't get it", "what do you mean", "i'm lost", "confused", "huh",
+    "what?", "i don't understand", "can you explain", "wait what",
+    "that doesn't make sense", "why would", "i thought"
+]
+
+# Boredom indicators
+BOREDOM_KEYWORDS = [
+    "idk", "sure", "whatever", "ok", "k", "mhm", "yeah", "cool",
+    "i guess", "don't care", "boring"
+]
+
+# Distress indicators
+DISTRESS_KEYWORDS = [
+    "i hate this", "i want to disappear", "i don't want to be here",
+    "i can't do this", "i give up", "worthless", "hopeless", "crying",
+    "terrible", "awful", "worst", "i'm done", "end it", "hurt myself"
+]
+
+# Positive indicators
+POSITIVE_KEYWORDS = [
+    "amazing", "wonderful", "great", "awesome", "love it", "excited",
+    "happy", "glad", "fantastic", "perfect", "yay", "can't wait"
+]
+
+def normalize_emotion(emotion_str: str) -> str:
+    """Extract base emotion from emoji + name format"""
+    if not emotion_str:
+        return "neutral"
+    # Remove emoji and normalize
+    emotion = emotion_str.lower()
+    for word in ["😊", "😔", "😠", "😮", "😨", "🤢", "😐", "😄", "😢"]:
+        emotion = emotion.replace(word, "").strip()
+    return emotion
+
+def classify_situation(
+    recent_turns: List[ConversationTurn],
+    current_emotion: str,
+    emotion_intensity: float
+) -> tuple[str, str]:
+    """
+    Classify the social situation based on conversation and emotion.
+    Returns (situation_type, situation_label)
+    """
+    emotion = normalize_emotion(current_emotion)
+    
+    # Gather recent text from other person
+    other_person_texts = [
+        t.text.lower() for t in recent_turns 
+        if t.speaker == "other_person" and t.text
+    ]
+    combined_text = " ".join(other_person_texts[-5:])  # Last 5 messages
+    
+    # Check for distress (highest priority)
+    if any(kw in combined_text for kw in DISTRESS_KEYWORDS):
+        return "high_distress", "Possible Distress"
+    
+    if emotion in ["sad", "fear", "fearful"] and emotion_intensity > 0.6:
+        return "high_distress", "High Emotional Distress"
+    
+    # Check for conflict
+    conflict_count = sum(1 for kw in CONFLICT_KEYWORDS if kw in combined_text)
+    if conflict_count >= 2 or (emotion in ["angry", "disgust", "frustrated"] and emotion_intensity > 0.5):
+        return "potential_conflict", "Possible Tension"
+    
+    if conflict_count >= 1 and emotion in ["angry", "disgust"]:
+        return "potential_conflict", "Possible Conflict"
+    
+    # Check for confusion
+    confusion_count = sum(1 for kw in CONFUSION_KEYWORDS if kw in combined_text)
+    if confusion_count >= 1 or (emotion == "surprise" and "?" in combined_text):
+        return "confusion", "Possible Confusion"
+    
+    # Check for boredom
+    boredom_count = sum(1 for kw in BOREDOM_KEYWORDS if kw in combined_text)
+    recent_lengths = [len(t.text) for t in recent_turns[-3:] if t.speaker == "other_person"]
+    avg_length = sum(recent_lengths) / len(recent_lengths) if recent_lengths else 50
+    
+    if boredom_count >= 2 or (avg_length < 10 and emotion == "neutral"):
+        return "boredom_disengaged", "Low Engagement"
+    
+    # Check for positive moment
+    positive_count = sum(1 for kw in POSITIVE_KEYWORDS if kw in combined_text)
+    if positive_count >= 1 or (emotion == "happy" and emotion_intensity > 0.6):
+        return "positive_moment", "Positive Interaction"
+    
+    # Default to casual chat
+    return "casual_chat", "Casual Conversation"
+
+def calculate_emotion_trend(turns: List[ConversationTurn], emotion_history: Optional[List] = None) -> str:
+    """Calculate if emotion is improving, stable, or declining based on emotion history"""
+    
+    # Prefer emotion_history if available (more accurate over time)
+    if emotion_history and len(emotion_history) >= 4:
+        positive_emotions = {"happy", "excited", "positive"}
+        negative_emotions = {"sad", "angry", "fear", "disgust", "frustrated", "anxious"}
+        
+        scores = []
+        for snapshot in emotion_history:
+            emotion = snapshot.get("emotion", snapshot.emotion if hasattr(snapshot, "emotion") else "neutral").lower()
+            if emotion in positive_emotions:
+                scores.append(1)
+            elif emotion in negative_emotions:
+                scores.append(-1)
+            else:
+                scores.append(0)
+        
+        if len(scores) >= 4:
+            # Compare first half to second half
+            mid = len(scores) // 2
+            first_half = sum(scores[:mid]) / mid
+            second_half = sum(scores[mid:]) / (len(scores) - mid)
+            
+            diff = second_half - first_half
+            if diff > 0.2:
+                return "improving"
+            elif diff < -0.2:
+                return "declining"
+            return "stable"
+    
+    # Fallback to conversation turns
+    if len(turns) < 3:
+        return "stable"
+    
+    positive_emotions = {"happy", "excited", "positive"}
+    negative_emotions = {"sad", "angry", "fear", "disgust", "frustrated", "anxious"}
+    
+    recent_emotions = []
+    for turn in turns[-6:]:
+        if turn.emotion_label:
+            emotion = normalize_emotion(turn.emotion_label)
+            if emotion in positive_emotions:
+                recent_emotions.append(1)
+            elif emotion in negative_emotions:
+                recent_emotions.append(-1)
+            else:
+                recent_emotions.append(0)
+    
+    if len(recent_emotions) < 2:
+        return "stable"
+    
+    # Compare first half to second half
+    mid = len(recent_emotions) // 2
+    first_half = sum(recent_emotions[:mid]) / mid if mid > 0 else 0
+    second_half = sum(recent_emotions[mid:]) / (len(recent_emotions) - mid)
+    
+    diff = second_half - first_half
+    if diff > 0.3:
+        return "improving"
+    elif diff < -0.3:
+        return "declining"
+    return "stable"
+
+def generate_advice(
+    situation_type: str,
+    current_emotion: str,
+    emotion_trend: str,
+    recent_turns: List[ConversationTurn]
+) -> tuple[str, List[SuggestedAction], str]:
+    """
+    Generate smart, context-aware advice based on actual conversation content.
+    Returns (explanation, suggestions, severity)
+    """
+    emotion = normalize_emotion(current_emotion)
+    
+    # Get conversation context
+    last_msgs = []
+    for turn in reversed(recent_turns):
+        if turn.speaker == "other_person" and turn.text:
+            last_msgs.append(turn.text)
+            if len(last_msgs) >= 3:
+                break
+    last_msgs.reverse()
+    
+    last_other_msg = last_msgs[-1] if last_msgs else ""
+    conversation_context = " ".join(last_msgs)
+    
+    # Build a rich explanation based on what was actually said
+    if situation_type == "high_distress":
+        explanation = f"Based on what they said"
+        if last_other_msg:
+            explanation += f" (\"{last_other_msg[:50]}{'...' if len(last_other_msg) > 50 else ''}\")"
+        explanation += f", they seem to be in distress. Their {emotion} expression confirms this is a serious moment."
+        
+        suggestions = [
+            SuggestedAction(
+                type="check_in",
+                text="I can see this is really affecting you. I'm here to listen if you want to talk."
+            ),
+            SuggestedAction(
+                type="pause_conversation",
+                text="We can take a break if you need. I'm not going anywhere."
+            ),
+            SuggestedAction(
+                type="verbal_reply",
+                text="That sounds really difficult. Thank you for sharing that with me."
+            )
+        ]
+        return explanation, suggestions, "high"
+    
+    elif situation_type == "potential_conflict":
+        explanation = "I'm sensing some tension in the conversation"
+        if last_other_msg:
+            explanation += f". When they said \"{last_other_msg[:40]}{'...' if len(last_other_msg) > 40 else ''}\", "
+            explanation += f"combined with their {emotion} expression, it suggests they might be frustrated or upset."
+        else:
+            explanation += f". Their {emotion} expression suggests they might be feeling frustrated."
+        
+        suggestions = [
+            SuggestedAction(
+                type="check_in",
+                text="I want to make sure I understand you correctly. Are you upset about something?"
+            ),
+            SuggestedAction(
+                type="verbal_reply",
+                text="I hear you. Let me think about what you said - I don't want to dismiss your feelings."
+            ),
+            SuggestedAction(
+                type="ask_question",
+                text="Help me understand - what's the most important thing you want me to know right now?"
+            )
+        ]
+        return explanation, suggestions, "medium"
+    
+    elif situation_type == "confusion":
+        explanation = "They might be confused or having trouble following"
+        if last_other_msg:
+            explanation += f". Their response \"{last_other_msg[:40]}{'...' if len(last_other_msg) > 40 else ''}\" "
+            explanation += "suggests they need clarification."
+        explanation += " Consider explaining things more simply."
+        
+        suggestions = [
+            SuggestedAction(
+                type="ask_question",
+                text="I might not have explained that well - what part is unclear?"
+            ),
+            SuggestedAction(
+                type="verbal_reply",
+                text="Let me try saying that differently - basically what I mean is..."
+            ),
+            SuggestedAction(
+                type="check_in",
+                text="Are you following so far, or should I back up?"
+            )
+        ]
+        return explanation, suggestions, "low"
+    
+    elif situation_type == "boredom_disengaged":
+        explanation = "The person seems disengaged"
+        if last_other_msg and len(last_other_msg) < 15:
+            explanation += f" - their short responses like \"{last_other_msg}\" suggest low interest."
+        else:
+            explanation += ". Their body language and brief responses indicate they might want to talk about something else."
+        
+        suggestions = [
+            SuggestedAction(
+                type="change_topic",
+                text="Actually, I'm curious - what's something you've been thinking about lately?"
+            ),
+            SuggestedAction(
+                type="ask_question",
+                text="Is there something else on your mind? We can switch gears."
+            ),
+            SuggestedAction(
+                type="verbal_reply",
+                text="I feel like I might be rambling - what would you rather talk about?"
+            )
+        ]
+        return explanation, suggestions, "low"
+    
+    elif situation_type == "positive_moment":
+        explanation = "This is a positive moment!"
+        if last_other_msg:
+            explanation += f" Their response \"{last_other_msg[:40]}{'...' if len(last_other_msg) > 40 else ''}\" "
+            explanation += f"and their {emotion} expression show they're engaged and happy. Keep this energy going!"
+        else:
+            explanation += f" Their {emotion} expression shows genuine positive emotion."
+        
+        suggestions = [
+            SuggestedAction(
+                type="verbal_reply",
+                text="I love seeing you this excited! Tell me more!"
+            ),
+            SuggestedAction(
+                type="ask_question",
+                text="That's awesome! What's the best part about it?"
+            ),
+            SuggestedAction(
+                type="verbal_reply",
+                text="Your happiness is contagious! This is great."
+            )
+        ]
+        return explanation, suggestions, "low"
+    
+    else:  # casual_chat
+        # Even for casual chat, provide context-aware responses
+        explanation = "The conversation is going smoothly"
+        if last_other_msg:
+            # Try to understand what they're talking about
+            if "?" in last_other_msg:
+                explanation += f". They asked: \"{last_other_msg[:50]}{'...' if len(last_other_msg) > 50 else ''}\" - consider giving a thoughtful answer."
+                suggestions = [
+                    SuggestedAction(
+                        type="verbal_reply",
+                        text="That's a good question. I think..."
+                    ),
+                    SuggestedAction(
+                        type="ask_question",
+                        text="Interesting question! What made you think of that?"
+                    ),
+                    SuggestedAction(
+                        type="verbal_reply",
+                        text="Hmm, let me think about that for a second..."
+                    )
+                ]
+            else:
+                explanation += f". They mentioned: \"{last_other_msg[:50]}{'...' if len(last_other_msg) > 50 else ''}\" - you could explore this topic or share your thoughts."
+                suggestions = [
+                    SuggestedAction(
+                        type="ask_question",
+                        text="That's interesting! How did that make you feel?"
+                    ),
+                    SuggestedAction(
+                        type="verbal_reply",
+                        text="I see what you mean. That reminds me of..."
+                    ),
+                    SuggestedAction(
+                        type="ask_question",
+                        text="Tell me more about that - I'm curious."
+                    )
+                ]
+        else:
+            explanation += f". Their {emotion} expression looks comfortable. You can continue naturally or bring up something new."
+            suggestions = [
+                SuggestedAction(
+                    type="ask_question",
+                    text="So what else is going on with you?"
+                ),
+                SuggestedAction(
+                    type="verbal_reply",
+                    text="Yeah, I totally get that."
+                ),
+                SuggestedAction(
+                    type="change_topic",
+                    text="Hey, that reminds me - I wanted to ask you about..."
+                )
+            ]
+        
+        return explanation, suggestions, "low"
+
+
+async def analyze_with_gemini(conversation_text: str, current_emotion: str, emotion_confidence: float, emotion_history_summary: str) -> dict:
+    """
+    Use Gemini AI to analyze the social situation and provide guidance.
+    """
+    if not GEMINI_API_KEY:
+        return None
+    
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""You are a social skills assistant helping someone who has difficulty reading social cues (like someone with autism or social anxiety). Analyze this conversation and provide helpful, specific guidance.
+
+CONVERSATION TRANSCRIPT:
+{conversation_text if conversation_text else "[No speech detected yet]"}
+
+CURRENT EMOTIONAL STATE:
+- Detected emotion: {current_emotion}
+- Confidence: {emotion_confidence}%
+- Recent emotion pattern: {emotion_history_summary}
+
+Based on this information, provide:
+1. A brief, friendly explanation of what's happening in the conversation and how the other person might be feeling (2-3 sentences max)
+2. The situation type (one of: casual_chat, potential_conflict, confusion, boredom_disengaged, positive_moment, high_distress)
+3. A situation label (short 2-3 word description)
+4. Severity level (low, medium, or high)
+5. Emotion trend (improving, stable, or declining)
+6. Three specific suggestions for what to say next, each with a type:
+   - verbal_reply: A direct response to continue the conversation
+   - ask_question: A question to ask them
+   - check_in: Checking on their feelings
+   - change_topic: Changing to a different subject
+   - pause_conversation: Taking a break if needed
+
+Format your response EXACTLY as JSON like this:
+{{
+  "explanation": "Your explanation here",
+  "situation_type": "casual_chat",
+  "situation_label": "Friendly Chat",
+  "severity": "low",
+  "emotion_trend": "stable",
+  "suggestions": [
+    {{"type": "verbal_reply", "text": "What you could say"}},
+    {{"type": "ask_question", "text": "A question to ask"}},
+    {{"type": "check_in", "text": "A way to check in"}}
+  ]
+}}
+
+Be warm, practical, and specific. Reference actual things said in the conversation when giving advice."""
+
+        print(f"   🤖 Sending to Gemini AI...")
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        print(f"   📤 Raw Gemini response (first 500 chars):")
+        print(f"   {response_text[:500]}")
+        
+        # Extract JSON from response (handle markdown code blocks)
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
+        import json
+        result = json.loads(response_text)
+        print(f"   ✅ Gemini analysis successful: {result.get('situation_label', 'Unknown')}")
+        return result
+        
+    except Exception as e:
+        print(f"   ⚠️ Gemini analysis failed: {e}")
+        return None
+
+
+@app.post("/api/interpret", response_model=InterpreterResponse)
+async def interpret_social_situation(request: InterpreterRequest):
+    """
+    Analyze conversation and emotions to provide social guidance using Gemini AI.
+    """
+    try:
+        print("=" * 50)
+        print("🧠 SOCIAL INTERPRETER REQUEST")
+        print(f"   Conversation turns: {len(request.conversation_history)}")
+        print(f"   Emotion history entries: {len(request.emotion_history) if request.emotion_history else 0}")
+        print(f"   Combined emotion: {request.combined_emotion}")
+        print(f"   Confidence: {request.combined_confidence}")
+        
+        # Build conversation text from history
+        conversation_lines = []
+        for turn in request.conversation_history[-15:]:  # Last 15 turns
+            if turn.text:
+                conversation_lines.append(f"Person: {turn.text}")
+        conversation_text = "\n".join(conversation_lines)
+        
+        print(f"   📝 Conversation text being sent to Gemini:")
+        print(f"   {conversation_text[:500] if conversation_text else '[EMPTY]'}")
+        
+        # Build emotion history summary
+        emotion_counts = {}
+        if request.emotion_history:
+            for snapshot in request.emotion_history[-20:]:
+                emotion = snapshot.emotion if hasattr(snapshot, 'emotion') else 'neutral'
+                emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
+        emotion_history_summary = ", ".join([f"{k}: {v}" for k, v in emotion_counts.items()]) if emotion_counts else "No history"
+        
+        current_emotion = request.combined_emotion or request.current_facial_emotion or "Neutral"
+        emotion_confidence = request.combined_confidence or request.current_facial_confidence or 50
+        
+        # Try Gemini AI first
+        gemini_result = await analyze_with_gemini(
+            conversation_text, 
+            current_emotion, 
+            emotion_confidence,
+            emotion_history_summary
+        )
+        
+        if gemini_result:
+            # Parse Gemini response
+            suggestions = [
+                SuggestedAction(type=s.get("type", "verbal_reply"), text=s.get("text", ""))
+                for s in gemini_result.get("suggestions", [])[:3]
+            ]
+            
+            return InterpreterResponse(
+                situation_label=gemini_result.get("situation_label", "Analyzing..."),
+                situation_type=gemini_result.get("situation_type", "casual_chat"),
+                explanation=gemini_result.get("explanation", "I'm analyzing the situation..."),
+                suggestions=suggestions if suggestions else [
+                    SuggestedAction(type="verbal_reply", text="I'm listening. Tell me more.")
+                ],
+                severity=gemini_result.get("severity", "low"),
+                emotion_trend=gemini_result.get("emotion_trend", "stable")
+            )
+        
+        # Fallback to rule-based analysis if Gemini fails
+        print("   📝 Falling back to rule-based analysis")
+        emotion_intensity = emotion_confidence / 100
+        recent_turns = request.conversation_history[-10:] if request.conversation_history else []
+        
+        situation_type, situation_label = classify_situation(
+            recent_turns, current_emotion, emotion_intensity
+        )
+        
+        # Simple emotion trend from history
+        emotion_trend = "stable"
+        if request.emotion_history and len(request.emotion_history) >= 4:
+            recent = [s.emotion.lower() if hasattr(s, 'emotion') else 'neutral' for s in request.emotion_history[-4:]]
+            positive = sum(1 for e in recent if 'happy' in e or 'positive' in e)
+            negative = sum(1 for e in recent if 'sad' in e or 'angry' in e or 'fear' in e)
+            if positive > negative:
+                emotion_trend = "improving"
+            elif negative > positive:
+                emotion_trend = "declining"
+        
+        explanation, suggestions, severity = generate_advice(
+            situation_type, current_emotion, emotion_trend, recent_turns
+        )
+        
+        print(f"   📊 Situation: {situation_type} ({situation_label})")
+        print(f"   📈 Trend: {emotion_trend}")
+        print(f"   ⚠️ Severity: {severity}")
+        print("=" * 50)
+        
+        return InterpreterResponse(
+            situation_label=situation_label,
+            situation_type=situation_type,
+            explanation=explanation,
+            suggestions=suggestions,
+            severity=severity,
+            emotion_trend=emotion_trend
+        )
+        
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"Error in social interpreter: {str(e)}")
+        print(f"Full traceback:\n{error_detail}")
+        
+        # Return safe default response
+        return InterpreterResponse(
+            situation_label="Unable to Analyze",
+            situation_type="casual_chat",
+            explanation="I couldn't analyze the situation. Make sure both recording buttons are started and have a conversation first.",
+            suggestions=[
+                SuggestedAction(type="verbal_reply", text="I'm listening. Tell me more."),
+                SuggestedAction(type="ask_question", text="How are you feeling about this?")
+            ],
+            severity="low",
+            emotion_trend="stable"
+        )
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

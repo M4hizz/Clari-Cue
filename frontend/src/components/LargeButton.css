@@ -36,3 +36,8 @@
   padding: 0.75rem 1.5rem;
   max-width: 200px;
 }
+
+body.theme-dark .large-button--settings {
+  background: #4b5563;
+  color: #e5e7eb;
+}
