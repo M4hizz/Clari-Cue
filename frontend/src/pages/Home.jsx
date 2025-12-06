@@ -8,6 +8,7 @@ function Home({ onOpenSettings }) {
   // Emotion Recognition State
   const webcamRef = useRef(null);
   const [emotionPaused, setEmotionPaused] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [emotionData, setEmotionData] = useState({
     emotion: "Neutral",
     explanation: "Waiting for analysis...",
@@ -16,48 +17,139 @@ function Home({ onOpenSettings }) {
       mouth: "neutral",
       posture: "neutral",
     },
+    confidence: 0,
+    all_emotions: {},
   });
 
   // Voice Tone State
   const [voicePaused, setVoicePaused] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [toneData, setToneData] = useState({
-    tone: "Neutral",
-    volume: "Medium",
-    pace: "Normal",
-    explanation: "Click 'Start Listening' to analyze your voice tone.",
+    emotion: "Neutral",
+    explanation: "Click 'Start Listening' to analyze your voice emotion.",
+    confidence: 0,
+    all_emotions: {},
   });
   const [audioLevel, setAudioLevel] = useState(0);
   const mediaRecorderRef = useRef(null);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
   const animationFrameRef = useRef(null);
+  const streamRef = useRef(null);
+  const voiceIntervalRef = useRef(null);
 
   // Emotion Analysis
   const analyzeEmotion = useCallback(async () => {
-    if (emotionPaused) return;
+    if (emotionPaused || isAnalyzing) return;
 
     try {
       const imageSrc = webcamRef.current?.getScreenshot();
-      if (!imageSrc) return;
+      if (!imageSrc) {
+        return;
+      }
 
+      setIsAnalyzing(true);
       const response = await fetch("http://localhost:8000/api/emotion", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: imageSrc }),
       });
 
+      if (!response.ok) {
+        console.error("Backend error:", response.status);
+        setIsAnalyzing(false);
+        return;
+      }
+
       const data = await response.json();
       setEmotionData(data);
+      setIsAnalyzing(false);
     } catch (error) {
       console.error("Error analyzing emotion:", error);
+      setIsAnalyzing(false);
+      setEmotionData({
+        emotion: "😐 Error",
+        explanation:
+          "Failed to connect to the backend. Make sure the server is running.",
+        details: {
+          eyes: "not detected",
+          mouth: "not detected",
+          posture: "not detected",
+        },
+      });
     }
-  }, [emotionPaused]);
+  }, [emotionPaused, isAnalyzing]);
 
-  // Voice Analysis
+  // Voice Analysis - Record and analyze in chunks
+  const recordAndAnalyze = useCallback(async () => {
+    if (!streamRef.current || voicePaused) return;
+
+    console.log("🎤 Starting voice recording chunk...");
+
+    return new Promise((resolve) => {
+      const chunks = [];
+      const recorder = new MediaRecorder(streamRef.current);
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        if (chunks.length > 0) {
+          const audioBlob = new Blob(chunks, { type: "audio/webm" });
+          console.log(`🎤 Recording complete: ${audioBlob.size} bytes`);
+          await analyzeVoice(audioBlob);
+        }
+        resolve();
+      };
+
+      recorder.start();
+
+      // Record for 2 seconds
+      setTimeout(() => {
+        if (recorder.state === "recording") {
+          recorder.stop();
+        }
+      }, 2000);
+    });
+  }, [voicePaused]);
+
+  // Continuous voice analysis effect
+  useEffect(() => {
+    if (!isListening || voicePaused) {
+      if (voiceIntervalRef.current) {
+        clearInterval(voiceIntervalRef.current);
+        voiceIntervalRef.current = null;
+      }
+      return;
+    }
+
+    console.log("🎙️ Starting continuous voice analysis...");
+
+    // Start immediately
+    recordAndAnalyze();
+
+    // Then repeat every 2.5 seconds (2s record + 0.5s gap)
+    voiceIntervalRef.current = setInterval(() => {
+      recordAndAnalyze();
+    }, 2500);
+
+    return () => {
+      if (voiceIntervalRef.current) {
+        clearInterval(voiceIntervalRef.current);
+        voiceIntervalRef.current = null;
+      }
+    };
+  }, [isListening, voicePaused, recordAndAnalyze]);
+
   const startListening = async () => {
     try {
+      console.log("🎤 Requesting microphone access...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      console.log("✅ Microphone access granted!");
 
       audioContextRef.current = new (window.AudioContext ||
         window.webkitAudioContext)();
@@ -67,34 +159,8 @@ function Home({ onOpenSettings }) {
       analyserRef.current.fftSize = 256;
 
       visualize();
-
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      const audioChunks = [];
-
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        audioChunks.push(event.data);
-      };
-
-      mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
-        await analyzeVoice(audioBlob);
-      };
-
-      mediaRecorderRef.current.start();
       setIsListening(true);
-
-      const interval = setInterval(() => {
-        if (!voicePaused && mediaRecorderRef.current?.state === "recording") {
-          mediaRecorderRef.current.stop();
-          setTimeout(() => {
-            if (mediaRecorderRef.current) {
-              mediaRecorderRef.current.start();
-            }
-          }, 100);
-        }
-      }, 3000);
-
-      return () => clearInterval(interval);
+      console.log("🎙️ Voice analysis started!");
     } catch (error) {
       console.error("Error accessing microphone:", error);
     }
@@ -117,37 +183,75 @@ function Home({ onOpenSettings }) {
 
   const analyzeVoice = async (audioBlob) => {
     try {
+      console.log(`📤 Sending audio to backend: ${audioBlob.size} bytes`);
       const formData = new FormData();
-      formData.append("audio", audioBlob);
+      formData.append("audio", audioBlob, "recording.webm");
 
       const response = await fetch("http://localhost:8000/api/tone", {
         method: "POST",
         body: formData,
       });
 
+      if (!response.ok) {
+        console.error("❌ Backend error:", response.status);
+        return;
+      }
+
       const data = await response.json();
+      console.log(`✅ Voice emotion detected: ${data.emotion}`);
       setToneData(data);
     } catch (error) {
-      console.error("Error analyzing voice:", error);
+      console.error("❌ Error analyzing voice:", error);
+      setToneData({
+        emotion: "😐 Error",
+        explanation:
+          "Failed to analyze voice. Make sure the backend is running.",
+        confidence: 0,
+        all_emotions: {},
+      });
     }
   };
 
   const stopListening = () => {
-    if (
-      mediaRecorderRef.current &&
-      mediaRecorderRef.current.state !== "inactive"
-    ) {
-      mediaRecorderRef.current.stop();
+    console.log("🛑 Stopping voice analysis...");
+
+    // Clear the interval
+    if (voiceIntervalRef.current) {
+      clearInterval(voiceIntervalRef.current);
+      voiceIntervalRef.current = null;
     }
+
+    // Stop the stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
     if (audioContextRef.current) {
       audioContextRef.current.close();
+      audioContextRef.current = null;
     }
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
     }
     setIsListening(false);
     setAudioLevel(0);
+    console.log("✅ Voice analysis stopped");
   };
+
+  // Auto-analyze emotion every 1.5 seconds when not paused
+  useEffect(() => {
+    if (emotionPaused) return;
+
+    const interval = setInterval(() => {
+      analyzeEmotion();
+    }, 1500);
+
+    // Initial analysis
+    analyzeEmotion();
+
+    return () => clearInterval(interval);
+  }, [emotionPaused, analyzeEmotion]);
 
   useEffect(() => {
     return () => {
@@ -176,17 +280,31 @@ function Home({ onOpenSettings }) {
                     facingMode: "user",
                   }}
                 />
+                {isAnalyzing && (
+                  <div className="analyzing-indicator">
+                    <span className="pulse-dot"></span> Analyzing...
+                  </div>
+                )}
               </div>
             </div>
 
             <div className="interpretation-section">
-              <div className="emotion-label">
+              <div className={`emotion-label ${isAnalyzing ? "updating" : ""}`}>
                 <h3>Detected: {emotionData.emotion}</h3>
               </div>
 
               <div className="emotion-explanation">
                 <p>{emotionData.explanation}</p>
               </div>
+
+              {emotionData.confidence > 0 && (
+                <div className="confidence-section">
+                  <p>
+                    <strong>Confidence:</strong>{" "}
+                    {emotionData.confidence.toFixed(1)}%
+                  </p>
+                </div>
+              )}
 
               <div className="emotion-details">
                 <p>
@@ -233,21 +351,36 @@ function Home({ onOpenSettings }) {
 
             <div className="tone-interpretation">
               <div className="tone-label">
-                <h3>Tone: {toneData.tone}</h3>
-              </div>
-
-              <div className="tone-metrics">
-                <p>
-                  <strong>Volume:</strong> {toneData.volume}
-                </p>
-                <p>
-                  <strong>Pace:</strong> {toneData.pace}
-                </p>
+                <h3>Detected: {toneData.emotion}</h3>
               </div>
 
               <div className="tone-explanation">
                 <p>{toneData.explanation}</p>
               </div>
+
+              {toneData.confidence > 0 && (
+                <div className="confidence-section">
+                  <p>
+                    <strong>Confidence:</strong>{" "}
+                    {toneData.confidence.toFixed(1)}%
+                  </p>
+                </div>
+              )}
+
+              {Object.keys(toneData.all_emotions).length > 0 && (
+                <div className="emotion-details">
+                  <p>
+                    <strong>All Emotions:</strong>
+                  </p>
+                  {Object.entries(toneData.all_emotions).map(
+                    ([emotion, score]) => (
+                      <p key={emotion}>
+                        {emotion}: {score}%
+                      </p>
+                    )
+                  )}
+                </div>
+              )}
 
               <div className="controls">
                 {!isListening ? (

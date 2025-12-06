@@ -70,6 +70,44 @@ body.theme-dark .camera-feed {
   display: block;
 }
 
+.analyzing-indicator {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  background: rgba(99, 102, 241, 0.9);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  background: white;
+  border-radius: 50%;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+}
+
+.camera-section {
+  position: relative;
+}
+
 .interpretation-section {
   flex: 1;
   display: flex;
@@ -77,11 +115,20 @@ body.theme-dark .camera-feed {
   gap: 1rem;
 }
 
+.emotion-label {
+  transition: opacity 0.2s ease;
+}
+
+.emotion-label.updating {
+  opacity: 0.7;
+}
+
 .emotion-label h3 {
   font-size: 22px;
   color: #6366f1;
   margin: 0;
   font-weight: 600;
+  transition: all 0.3s ease;
 }
 
 .emotion-explanation {
@@ -96,6 +143,27 @@ body.theme-dark .emotion-explanation {
 
 .emotion-explanation p {
   margin: 0;
+}
+
+.confidence-section {
+  padding: 0.75rem;
+  background: #ede9fe;
+  border-radius: 6px;
+  text-align: center;
+}
+
+body.theme-dark .confidence-section {
+  background: #4c1d95;
+}
+
+.confidence-section p {
+  margin: 0;
+  font-size: 16px;
+  color: #6366f1;
+}
+
+body.theme-dark .confidence-section p {
+  color: #a78bfa;
 }
 
 .emotion-details {
