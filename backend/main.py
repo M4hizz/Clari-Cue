@@ -270,16 +270,61 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             print("   Loading audio with librosa...")
             audio_array, sr = librosa.load(temp_audio_path, sr=16000, mono=True)
             audio_array = audio_array.astype(np.float32)
-            print(f"   ✅ Audio loaded! Duration: {len(audio_array)/sr:.2f}s")
+            duration = len(audio_array)/sr
+            print(f"   ✅ Audio loaded! Duration: {duration:.2f}s")
             
-            # Load Whisper model (using 'tiny' for speed)
+            # Skip if audio is too short (likely just noise)
+            if duration < 0.5:
+                print("   ⚠️ Audio too short, skipping")
+                return {"text": "", "language": "en"}
+            
+            # Load Whisper model (using 'base' for better accuracy)
             print("   Loading Whisper model...")
-            model = whisper.load_model("tiny")
+            model = whisper.load_model("base")
             
-            # Transcribe using the numpy array directly
+            # Transcribe with better settings for accuracy
             print("   Transcribing audio...")
-            result = model.transcribe(audio_array, language="en")
+            result = model.transcribe(
+                audio_array, 
+                language="en",
+                fp16=False,  # More accurate on CPU
+                condition_on_previous_text=False,  # Avoid hallucinations
+                no_speech_threshold=0.6,  # Filter out non-speech
+                logprob_threshold=-1.0,  # Accept lower confidence
+            )
             text = result["text"].strip()
+            
+            # Filter out common Whisper hallucinations
+            hallucinations = [
+                "thank you", "thanks for watching", "subscribe",
+                "like and subscribe", "see you next time", "bye",
+                "you", ".", "..", "...", "okay", "oh", "um", "uh",
+                "hmm", "hm", "ah", "the", "and", "a", "i", "it",
+                "thanks", "thank you for watching", "please subscribe",
+                "like this video", "comment below", "bell icon",
+                "don't forget to subscribe", "hit the like button",
+                "see you in the next video", "peace", "bye bye",
+                "music", "[music]", "(music)", "applause", "[applause]",
+                "silence", "...", "—", "–"
+            ]
+            text_lower = text.lower().strip()
+            
+            # Check exact matches
+            if text_lower in hallucinations or len(text) < 3:
+                print(f"   ⚠️ Filtered hallucination: '{text}'")
+                text = ""
+            # Check if text contains only repetitive characters
+            elif len(set(text_lower.replace(' ', ''))) < 3:
+                print(f"   ⚠️ Filtered repetitive: '{text}'")
+                text = ""
+            # Check for YouTube-style hallucinations
+            elif any(h in text_lower for h in ['subscribe', 'like and', 'watch', 'video', 'channel', 'comment', 'bell']):
+                print(f"   ⚠️ Filtered YouTube hallucination: '{text}'")
+                text = ""
+            # Check for very short meaningless phrases
+            elif len(text_lower.split()) == 1 and len(text_lower) < 5:
+                print(f"   ⚠️ Filtered short word: '{text}'")
+                text = ""
             
             print(f"   📝 Transcription: '{text}'")
             print("=" * 50)
@@ -858,46 +903,66 @@ async def analyze_with_gemini(conversation_text: str, current_emotion: str, emot
         return None
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
-        prompt = f"""You are a social skills assistant helping someone who has difficulty reading social cues (like someone with autism or social anxiety). Analyze this conversation and provide helpful, specific guidance.
+        # Count conversation turns for context
+        convo_lines = conversation_text.strip().split('\n') if conversation_text else []
+        num_turns = len([l for l in convo_lines if l.strip()])
+        
+        # Determine if emotions suggest negativity
+        negative_emotions = ['angry', 'sad', 'fear', 'disgust', 'frustrated', 'annoyed', 'upset']
+        emotion_lower = current_emotion.lower()
+        is_negative_emotion = any(neg in emotion_lower for neg in negative_emotions)
+        
+        prompt = f"""You are a social skills assistant helping someone who struggles with reading social cues. Your job is to ACCURATELY analyze the conversation - do NOT sugarcoat or be overly positive.
 
-CONVERSATION TRANSCRIPT:
-{conversation_text if conversation_text else "[No speech detected yet]"}
+CRITICAL INSTRUCTIONS:
+- Be HONEST about the emotional tone - if there's tension, SAY SO
+- Do NOT default to "casual_chat" - actually analyze the content
+- If emotions detected are negative (angry, sad, fear, etc.), the situation is likely NOT casual
+- Look for: criticism, complaints, frustration, disagreement, sarcasm, passive-aggression
+- Short/curt responses often indicate annoyance or disinterest
+- Pay attention to the detected emotions - they are your guide
 
-CURRENT EMOTIONAL STATE:
-- Detected emotion: {current_emotion}
+CONVERSATION ({num_turns} turns):
+{conversation_text if conversation_text else "[No conversation recorded]"}
+
+EMOTIONAL DATA (VERY IMPORTANT):
+- Current emotion: {current_emotion} {"⚠️ NEGATIVE EMOTION DETECTED" if is_negative_emotion else ""}
 - Confidence: {emotion_confidence}%
-- Recent emotion pattern: {emotion_history_summary}
+- Emotion pattern: {emotion_history_summary}
 
-Based on this information, provide:
-1. A brief, friendly explanation of what's happening in the conversation and how the other person might be feeling (2-3 sentences max)
-2. The situation type (one of: casual_chat, potential_conflict, confusion, boredom_disengaged, positive_moment, high_distress)
-3. A situation label (short 2-3 word description)
-4. Severity level (low, medium, or high)
-5. Emotion trend (improving, stable, or declining)
-6. Three specific suggestions for what to say next, each with a type:
-   - verbal_reply: A direct response to continue the conversation
-   - ask_question: A question to ask them
-   - check_in: Checking on their feelings
-   - change_topic: Changing to a different subject
-   - pause_conversation: Taking a break if needed
+SITUATION CLASSIFICATION (choose the MOST ACCURATE one):
+- casual_chat: ONLY if genuinely light, friendly, relaxed conversation with positive/neutral emotions
+- potential_conflict: ANY signs of tension, disagreement, frustration, criticism, or annoyance - USE THIS if emotions are angry/frustrated
+- confusion: Misunderstanding, unclear communication, someone seems lost
+- boredom_disengaged: Short responses, changing topics, seeming distracted, disinterest
+- positive_moment: Genuine excitement, joy, laughter, strong positive connection
+- high_distress: Strong negative emotions - crying, yelling, very upset, angry outbursts
 
-Format your response EXACTLY as JSON like this:
+SEVERITY GUIDE:
+- low: Everything is fine, no intervention needed
+- medium: Some attention needed, could go either way
+- high: Needs immediate attention, de-escalation, or support
+
+RESPOND WITH JSON:
 {{
-  "explanation": "Your explanation here",
-  "situation_type": "casual_chat",
-  "situation_label": "Friendly Chat",
-  "severity": "low",
-  "emotion_trend": "stable",
+  "explanation": "Honest assessment of what's happening - mention specific emotional cues",
+  "situation_type": "potential_conflict",
+  "situation_label": "Getting Tense",
+  "severity": "medium",
+  "emotion_trend": "declining",
   "suggestions": [
-    {{"type": "verbal_reply", "text": "What you could say"}},
-    {{"type": "ask_question", "text": "A question to ask"}},
-    {{"type": "check_in", "text": "A way to check in"}}
+    {{"type": "verbal_reply", "text": "Something acknowledging the situation"}},
+    {{"type": "check_in", "text": "Direct question about their feelings"}},
+    {{"type": "pause_conversation", "text": "If needed: suggest taking a break"}}
   ]
 }}
 
-Be warm, practical, and specific. Reference actual things said in the conversation when giving advice."""
+REMEMBER: 
+- If emotion is angry/frustrated/sad → NOT a casual_chat
+- If someone seems annoyed → potential_conflict or boredom_disengaged  
+- Be helpful by being ACCURATE, not by being falsely positive"""
 
         print(f"   🤖 Sending to Gemini AI...")
         response = model.generate_content(prompt)
@@ -935,15 +1000,26 @@ async def interpret_social_situation(request: InterpreterRequest):
         print(f"   Combined emotion: {request.combined_emotion}")
         print(f"   Confidence: {request.combined_confidence}")
         
-        # Build conversation text from history
+        # Build conversation text from ALL history (up to 30 turns for context)
         conversation_lines = []
-        for turn in request.conversation_history[-15:]:  # Last 15 turns
-            if turn.text:
-                conversation_lines.append(f"Person: {turn.text}")
+        for i, turn in enumerate(request.conversation_history[-30:]):  # Last 30 turns for full context
+            if turn.text and turn.text.strip():
+                # Include turn number and timestamp for context
+                timestamp = turn.timestamp if hasattr(turn, 'timestamp') and turn.timestamp else ""
+                emotion = turn.emotion_label if hasattr(turn, 'emotion_label') and turn.emotion_label else ""
+                line = f"[{i+1}] Person: \"{turn.text}\""
+                if emotion:
+                    line += f" (detected emotion: {emotion})"
+                conversation_lines.append(line)
+        
         conversation_text = "\n".join(conversation_lines)
         
+        # If no conversation, explicitly say so
+        if not conversation_text.strip():
+            conversation_text = ""
+        
         print(f"   📝 Conversation text being sent to Gemini:")
-        print(f"   {conversation_text[:500] if conversation_text else '[EMPTY]'}")
+        print(f"   {conversation_text[:500] if conversation_text else '[EMPTY - No conversation recorded]'}")
         
         # Build emotion history summary
         emotion_counts = {}

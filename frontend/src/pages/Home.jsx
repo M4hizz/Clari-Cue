@@ -4,6 +4,20 @@ import Header from "../components/Header";
 import LargeButton from "../components/LargeButton";
 import "./Home.css";
 
+// Simple text similarity function (Jaccard similarity on words)
+function calculateSimilarity(text1, text2) {
+  const words1 = new Set(text1.split(/\s+/).filter((w) => w.length > 2));
+  const words2 = new Set(text2.split(/\s+/).filter((w) => w.length > 2));
+
+  if (words1.size === 0 && words2.size === 0) return 1;
+  if (words1.size === 0 || words2.size === 0) return 0;
+
+  const intersection = new Set([...words1].filter((w) => words2.has(w)));
+  const union = new Set([...words1, ...words2]);
+
+  return intersection.size / union.size;
+}
+
 function Home({ onOpenSettings }) {
   // Emotion Recognition State
   const webcamRef = useRef(null);
@@ -559,7 +573,7 @@ function Home({ onOpenSettings }) {
         if (recorder.state === "recording") {
           recorder.stop();
         }
-      }, 1500);
+      }, 3000); // Record for 3 seconds for better context
     });
   }, [transcriptPaused]);
 
@@ -578,10 +592,10 @@ function Home({ onOpenSettings }) {
     // Start immediately
     recordAndTranscribe();
 
-    // Then repeat every 1.7 seconds (1.5s record + 0.2s gap)
+    // Then repeat every 3.5 seconds (3s record + 0.5s processing gap)
     transcriptIntervalRef.current = setInterval(() => {
       recordAndTranscribe();
-    }, 1700);
+    }, 3500);
 
     return () => {
       if (transcriptIntervalRef.current) {
@@ -629,9 +643,27 @@ function Home({ onOpenSettings }) {
       // Update current transcript (shows what's being said right now)
       setCurrentTranscript(text || "");
 
-      if (text && text.length > 0) {
+      if (text && text.length > 2) {
         console.log(`✅ Transcription: "${text}"`);
         setConversationHistory((prev) => {
+          // Check for duplicate or very similar text (avoid repeated entries)
+          const lastEntry = prev[prev.length - 1];
+          if (lastEntry) {
+            // Skip if text is identical or nearly identical to last entry
+            const similarity = calculateSimilarity(
+              lastEntry.text.toLowerCase(),
+              text.toLowerCase()
+            );
+            if (similarity > 0.8) {
+              console.log(
+                `⚠️ Skipping duplicate (${Math.round(
+                  similarity * 100
+                )}% similar)`
+              );
+              return prev;
+            }
+          }
+
           const newEntry = {
             id: Date.now(),
             text: text,
