@@ -1,0 +1,38 @@
+.large-button {
+  width: 100%;
+  max-width: 500px;
+  padding: 1.5rem 2rem;
+  font-size: 20px;
+  font-weight: 500;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 150ms ease;
+  margin-bottom: 1.5rem;
+}
+
+.large-button:hover {
+  opacity: 0.85;
+}
+
+.large-button:active {
+  opacity: 0.7;
+}
+
+.large-button--primary {
+  background: #6366f1;
+  color: white;
+}
+
+.large-button--secondary {
+  background: #8b5cf6;
+  color: white;
+}
+
+.large-button--settings {
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 16px;
+  padding: 0.75rem 1.5rem;
+  max-width: 200px;
+}

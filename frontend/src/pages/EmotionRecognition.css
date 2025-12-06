@@ -1,0 +1,101 @@
+.emotion-screen {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 2rem;
+}
+
+.emotion-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  padding: 0 1rem;
+  margin-bottom: 2rem;
+}
+
+@media (min-width: 1024px) {
+  .emotion-content {
+    flex-direction: row;
+    padding: 0 2rem;
+    gap: 3rem;
+  }
+}
+
+.camera-section {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.camera-feed {
+  width: 100%;
+  max-width: 640px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid #e5e7eb;
+}
+
+.camera-feed video {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.interpretation-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.5rem;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.emotion-label h2 {
+  font-size: 28px;
+  color: #6366f1;
+  margin: 0;
+  font-weight: 600;
+}
+
+.emotion-explanation {
+  font-size: 18px;
+  line-height: 1.6;
+  color: #374151;
+}
+
+.emotion-explanation p {
+  margin: 0;
+}
+
+.emotion-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  font-size: 16px;
+  color: #6b7280;
+}
+
+.emotion-details p {
+  margin: 0;
+}
+
+.emotion-details strong {
+  color: #374151;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 1rem;
+  margin-top: auto;
+}
+
+@media (min-width: 768px) {
+  .controls {
+    flex-direction: row;
+    justify-content: center;
+  }
+}

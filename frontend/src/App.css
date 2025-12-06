@@ -1,0 +1,100 @@
+:root {
+  --transition-speed: 150ms;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.app {
+  min-height: 100vh;
+  transition: background-color var(--transition-speed) ease,
+    color var(--transition-speed) ease;
+}
+
+/* Theme: Light (default) */
+body.theme-light {
+  background-color: #f9fafb;
+  color: #374151;
+}
+
+body.theme-light .modal-content {
+  background: white;
+  color: #374151;
+}
+
+/* Theme: Dark */
+body.theme-dark {
+  background-color: #1f2937;
+  color: #e5e7eb;
+}
+
+body.theme-dark .modal-content {
+  background: #374151;
+  color: #e5e7eb;
+}
+
+body.theme-dark .interpretation-section,
+body.theme-dark .tone-interpretation,
+body.theme-dark .visualizer-section {
+  background: #374151 !important;
+}
+
+body.theme-dark .setting-group select {
+  background: #1f2937;
+  color: #e5e7eb;
+  border-color: #4b5563;
+}
+
+body.theme-dark .camera-feed {
+  border-color: #4b5563;
+}
+
+/* Text Size: Small */
+body.text-small {
+  font-size: 14px;
+}
+
+body.text-small .header h1 {
+  font-size: 24px;
+}
+
+body.text-small .large-button {
+  font-size: 16px;
+}
+
+body.text-small .emotion-label h2,
+body.text-small .tone-label h2 {
+  font-size: 22px;
+}
+
+/* Text Size: Medium (default) */
+body.text-medium {
+  font-size: 16px;
+}
+
+/* Text Size: Large */
+body.text-large {
+  font-size: 20px;
+}
+
+body.text-large .header h1 {
+  font-size: 36px;
+}
+
+body.text-large .large-button {
+  font-size: 24px;
+  padding: 2rem 2.5rem;
+}
+
+body.text-large .emotion-label h2,
+body.text-large .tone-label h2 {
+  font-size: 32px;
+}
+
+body.text-large .emotion-explanation,
+body.text-large .tone-explanation {
+  font-size: 22px;
+}
